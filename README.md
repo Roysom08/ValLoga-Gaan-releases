@@ -7,7 +7,7 @@ This project uses and modifies components from the open-source project **ViTune*
 
 All changes, improvements, and customizations in this version are made by **Roysom Duwarah** in compliance with the GPLv3 license.
 
-##Disclaimer
+## Disclaimer
 
 This project and its contents are not affiliated with, funded, authorized, endorsed by, or in any way associated with YouTube, Google LLC or any of its affiliates and subsidiaries.
 
