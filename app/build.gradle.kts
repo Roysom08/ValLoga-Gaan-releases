@@ -1,0 +1,264 @@
+import org.jetbrains.kotlin.compose.compiler.gradle.ComposeFeatureFlag
+import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+import java.util.Properties
+import java.io.FileInputStream
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.parcelize)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.chaquo)
+}
+
+android {
+    val appId = "${project.group}.android"
+
+    namespace = appId
+    compileSdk = 36
+
+    val abis = listOf("arm64-v8a", "x86_64")
+    val cmakeVersion = "4.1.1"
+    ndkVersion = "29.0.14206865"
+
+    defaultConfig {
+        applicationId = appId
+
+        minSdk = 24
+        targetSdk = 36
+
+        versionCode = System.getenv("ANDROID_VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = project.version.toString()
+
+        multiDexEnabled = true
+
+        ndk {
+            //noinspection ChromeOsAbiSupport
+            abiFilters += abis
+        }
+
+        @Suppress("UnstableApiUsage")
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_static")
+            }
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            isUniversalApk = false
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            val keystorePropertiesFile = rootProject.file("app/keystore.properties")
+            if (keystorePropertiesFile.exists()) {
+                val keystoreProperties = Properties()
+                keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+                
+                storeFile = file("${keystoreProperties["storeFile"]}")
+                storePassword = keystoreProperties["storePassword"].toString()
+                keyAlias = keystoreProperties["keyAlias"].toString()
+                keyPassword = keystoreProperties["keyPassword"].toString()
+            }
+        }
+        
+        create("ci") {
+            storeFile = System.getenv("ANDROID_NIGHTLY_KEYSTORE")?.let { file(it) }
+            storePassword = System.getenv("ANDROID_NIGHTLY_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("ANDROID_NIGHTLY_KEYSTORE_ALIAS")
+            keyPassword = System.getenv("ANDROID_NIGHTLY_KEYSTORE_PASSWORD")
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix = ".vallogagaan"
+            versionNameSuffix = "-DEBUG"
+            manifestPlaceholders["appName"] = "ValLoga Gaan Debug"
+        }
+
+        release {
+            versionNameSuffix = "-RELEASE"
+            isMinifyEnabled = true
+            isShrinkResources = true
+            manifestPlaceholders["appName"] = "ValLoga Gaan"
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+
+        create("nightly") {
+            initWith(getByName("release"))
+            matchingFallbacks += "release"
+
+            applicationIdSuffix = ".nightly"
+            versionNameSuffix = "-NIGHTLY"
+            manifestPlaceholders["appName"] = "ValLoga Gaan Nightly"
+            signingConfig = signingConfigs.findByName("ci")
+        }
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    compileOptions {
+        isCoreLibraryDesugaringEnabled = true
+    }
+
+    packaging {
+        resources.excludes.add("META-INF/**/*")
+        jniLibs.useLegacyPackaging = true
+        resources.pickFirsts.add("**/resources.arsc")
+    }
+    
+    aaptOptions {
+        noCompress("arsc")
+    }
+
+    androidResources {
+        @Suppress("UnstableApiUsage")
+        generateLocaleConfig = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            version = cmakeVersion
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+}
+
+afterEvaluate {
+    val jniLibs = file("${layout.projectDirectory}/src/main/jniLibs").also { it.mkdirs() }
+    android.buildTypes.forEach { type ->
+        val typeCapitalized = type.name.let {
+            it.first().uppercase() + it.substring(1)
+        }
+
+        tasks.named("assemble${typeCapitalized}").configure {
+            doFirst {
+                val cxxDir =
+                    file("${layout.buildDirectory.get()}/intermediates/cxx/${if (typeCapitalized == "Debug") "Debug" else "RelWithDebInfo"}")
+
+                cxxDir.walkTopDown().forEach cxx@{ f ->
+                    if (f.name != "qjs") return@cxx
+
+                    f.copyTo(
+                        target = jniLibs
+                            .resolve(f.parentFile.name)
+                            .also { it.mkdirs() }
+                            .resolve("libqjs.so"), // disguise because fuck you
+                        overwrite = true
+                    )
+                }
+            }
+        }
+    }
+}
+
+kotlin {
+    jvmToolchain(libs.versions.jvm.get().toInt())
+
+    compilerOptions {
+        languageVersion.set(KotlinVersion.KOTLIN_2_2)
+
+        freeCompilerArgs.addAll(
+            "-Xcontext-parameters",
+            "-Xnon-local-break-continue",
+            "-Xconsistent-data-class-copy-visibility"
+        )
+    }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+composeCompiler {
+    if (project.findProperty("enableComposeCompilerReports") == "true") {
+        val dest = layout.buildDirectory.dir("compose_metrics")
+        metricsDestination = dest
+        reportsDestination = dest
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version = "3.13"
+        pip {
+            install("yt-dlp>=2025.11.12")
+            install("yt-dlp-ejs")
+            install("pip")
+        }
+    }
+}
+
+dependencies {
+    coreLibraryDesugaring(libs.desugaring)
+
+    implementation(projects.compose.persist)
+    implementation(projects.compose.preferences)
+    implementation(projects.compose.routing)
+    implementation(projects.compose.reordering)
+
+    implementation(fileTree(projectDir.resolve("vendor")))
+
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.activity)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.util)
+    implementation(libs.compose.shimmer)
+    implementation(libs.compose.lottie)
+    implementation(libs.compose.material3)
+
+    implementation(libs.coil.compose)
+    implementation(libs.coil.ktor)
+
+    implementation(libs.palette)
+    implementation(libs.monet)
+    runtimeOnly(projects.core.materialCompat)
+
+    implementation(libs.exoplayer)
+    implementation(libs.exoplayer.workmanager)
+    implementation(libs.media3.session)
+    implementation(libs.media)
+
+    implementation(libs.workmanager)
+    implementation(libs.workmanager.ktx)
+
+    implementation(libs.credentials)
+    implementation(libs.credentials.play)
+
+    implementation(libs.kotlin.coroutines)
+    implementation(libs.kotlin.immutable)
+    implementation(libs.kotlin.datetime)
+
+    implementation(libs.room)
+    ksp(libs.room.compiler)
+
+    implementation(libs.log4j)
+    implementation(libs.slf4j)
+    implementation(libs.logback)
+
+    implementation(projects.providers.innertube)
+    implementation(projects.providers.kugou)
+    implementation(projects.providers.lrclib)
+    implementation(projects.providers.piped)
+    implementation(projects.providers.sponsorblock)
+    implementation(projects.providers.translate)
+    implementation(projects.core.data)
+    implementation(projects.core.ui)
+
+    detektPlugins(libs.detekt.compose)
+    detektPlugins(libs.detekt.formatting)
+}
